@@ -1,0 +1,129 @@
+version: '3.8'
+
+volumes:
+  postgres:
+  pgadmin:
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.8.0
+  environment: &airflow-common-env
+    PYTHONPATH: "/home/airflow/.local/lib/python3.6/site-packages"
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor  # Change to LocalExecutor if needed
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:password@postgres:5432/demo1
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:password@postgres:5432/demo1
+    AIRFLOW__CORE__FERNET_KEY: mP5jTf4qLIyXSe9bgAOUp4H1sbYEDSxPJOTqlS-1Nz4=  # Generate a Fernet key
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/script:/opt/airflow/script
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy 
+
+services:
+  postgres:
+    container_name: demo_postgres
+    image: "postgres:15"
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "password"
+      PGDATA: "/data/postgres"
+    volumes:
+      - postgres:/data/postgres
+      - ./postgres/docker_postgres_init.sql:/docker-entrypoint-initdb.d/docker_postgres_init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 5s    
+    ports:
+      - "15432:5432"
+    restart: unless-stopped
+
+  pgadmin:
+    container_name: demo_pgadmin
+    labels:
+      org.springframework.boot.ignore: true
+    image: "dpage/pgadmin4:7.4"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    volumes:
+       - pgadmin:/var/lib/pgadmin
+       - ./docker_pgadmin_servers.json:/pgadmin4/servers.json
+    ports:
+      - "15433:80"
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - "/bin/echo 'postgres:5432:*:postgres:password' > /tmp/pgpassfile && chmod 600 /tmp/pgpassfile && /entrypoint.sh"
+    restart: unless-stopped  
+
+  airflow-init:
+    <<: *airflow-common
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: /opt/airflow/script/entry-point.sh
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: true
+      _AIRFLOW_WWW_USER_CREATE: true
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      <<: *airflow-common-depends-on
+    # Ensure the init service runs only once and then stops
+    restart: "no"
+
+  airflow-webserver:
+    image: apache/airflow:2.8.0
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/logs:/opt/airflow/logs
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor  # Adjust executor if needed
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:password@postgres:5432/demo1
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:password@postgres:5432/demo1
+      - AIRFLOW__CORE__FERNET_KEY=mP5jTf4qLIyXSe9bgAOUp4H1sbYEDSxPJOTqlS-1Nz4=  # Generate a Fernet key
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-worker:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
